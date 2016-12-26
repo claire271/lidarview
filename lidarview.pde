@@ -15,9 +15,14 @@ final int GB = 63;
 int[] rxBuf;
 int rxBufIndex = 0;
 float[] inBuf;
+float[] heights;
+int nheights = 0;
 
 //Main serial port
 Serial port;
+
+//Actual distance for calibration
+float distance = 0.0;
 
 //Framerate display
 float fps = 0;
@@ -54,7 +59,7 @@ void setup() {
   
   //Validate the entered number, quit if it is invalid
   String portName = "";
-  try{
+  try {
     int index = Integer.parseInt(dialogOutput);
     if(index < 0 || index >= portList.length) {
       throw new IndexOutOfBoundsException();
@@ -72,14 +77,29 @@ void setup() {
   JDialog dialog2 = new JDialog();
   dialog2.setAlwaysOnTop(true);
   String dialog2Output = JOptionPane.showInputDialog(dialog2, "Enter the calibration distance (in millimeters)\n(Press cancel to skip calibration)");
-  
+  try {
+    if(dialog2Output != null) {
+      distance = Float.parseFloat(dialog2Output);
+    }
+  } catch (NumberFormatException ex) {
+    print("Not a number");
+    exit();
+  }
   
   //Actually connect to the port
   port = new Serial(this, portName, 115200);
   
+  //Reset the offset if we're calibrating
+  if(distance > 0) {
+    String command = "oo" + Integer.toString(0) + " ";
+    byte[] bytes = command.getBytes();
+    port.write(bytes);
+  }
+  
   //Set up buffers
   rxBuf = new int[iwidth * 3 / 2 + 3];
   inBuf = new float[iwidth];
+  heights = new float[iwidth];
   
   //Initialize framerate display
   old_time = System.currentTimeMillis();
@@ -125,38 +145,75 @@ void draw() {
           line(width/2 + i, 0, width/2 + i, height);
         }
         
-        
         //Render the data
         loadPixels();
+        nheights = 0;
         for(int i = 0;i < iwidth;i++) {
-          float dpos = VD * H / inBuf[i];
-          float xpos = dpos * (i - iwidth / 2) / VD;
-          
-          xpos /= scale;
-          dpos /= scale;
-          
-          boolean outOfRange = false;
-          if(xpos < -width/2) {
-            xpos = -width/2;
-            outOfRange = true;
+          if(inBuf[i] != 254) {
+            float dpos = VD * H / inBuf[i];
+            float xpos = dpos * (i - iwidth / 2) / VD;
+            
+            xpos /= scale;
+            dpos /= scale;
+            
+            boolean outOfRange = false;
+            if(xpos < -width/2) {
+              xpos = -width/2;
+              outOfRange = true;
+            }
+            if(xpos > width/2-1) {
+              xpos = width/2-1;
+              outOfRange = true;
+            }
+            
+            if(dpos < 0) {
+              dpos = 0;
+              outOfRange = true;
+            }
+            if(dpos > height-1) {
+              dpos = height-1;
+              outOfRange = true;
+            }
+            
+            pixels[((int)xpos + width/2) + (height - 1 - (int)dpos) * width] = color(outOfRange ? 255 : 0, 255, 0);
+            heights[nheights++] = dpos;
           }
-          if(xpos > width/2-1) {
-            xpos = width/2-1;
-            outOfRange = true;
-          }
-          
-          if(dpos < 0) {
-            dpos = 0;
-            outOfRange = true;
-          }
-          if(dpos > height-1) {
-            dpos = height-1;
-            outOfRange = true;
-          }
-          
-          pixels[((int)xpos + width/2) + (height - 1 - (int)dpos) * width] = color(outOfRange ? 255 : 0, 255, 0);
         }
         updatePixels();
+        
+        //Figure out the average line
+        if(distance > 0) {
+          float average = 0;
+          for(int i = 0;i < nheights;i++) {
+            average += heights[i];
+          }
+          average /= nheights;
+          float old_avg = average;
+          int count = 0;
+          average = 0;
+      
+          for(int i = 0;i < nheights;i++) {
+            if(Math.abs(old_avg - heights[i]) < 100) {
+              count++;
+              average += heights[i];
+            }
+          }
+          average /= count;
+          average *= scale;
+          stroke(0, GB, GB);
+          line(0, height - average/scale, width, height - average/scale);
+          
+          float in = VD * H / average;
+          float err = average - distance;
+          float new_offset = (err * in * in) / (H * VD + err * in);
+          
+          fill(0, 255, 255);
+          text("Offset: " + ((int)(new_offset * 100 + 0.5))/100.0,5,30);
+         
+          String command = "oa" + Integer.toString(Math.round(new_offset)) + " ";
+          byte[] bytes = command.getBytes();
+          port.write(bytes);
+        }
         
         //Calculate framerate
         long cur_time = System.currentTimeMillis();
@@ -165,7 +222,7 @@ void draw() {
         fps = fps * TDC + cur_fps * (1.0f - TDC);
         
         //Draw framerate
-        fill(0, 255, 255);
+        fill(255, 255, 255);
         text("Current FPS: " + ((int)(fps * 100 + 0.5))/100.0,5,15);
       }
       else if(rxBufIndex == rxBuf.length) {
